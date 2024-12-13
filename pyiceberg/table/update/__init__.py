@@ -19,16 +19,26 @@ from __future__ import annotations
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime
-from functools import singledispatch
+from functools import singledispatch, wraps
 from typing import TYPE_CHECKING, Any, Dict, Generic, List, Literal, Optional, Tuple, TypeVar, Union
 
 from pydantic import Field, field_validator
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_random_exponential
 from typing_extensions import Annotated
 
 from pyiceberg.exceptions import CommitFailedException
 from pyiceberg.partitioning import PARTITION_FIELD_ID_START, PartitionSpec
 from pyiceberg.schema import Schema
-from pyiceberg.table.metadata import SUPPORTED_TABLE_FORMAT_VERSION, TableMetadata, TableMetadataUtil
+from pyiceberg.table.metadata import (
+    COMMIT_MAX_RETRY_WAIT_MS,
+    COMMIT_MAX_RETRY_WAIT_MS_DEFAULT,
+    COMMIT_MIN_RETRY_WAIT_MS,
+    COMMIT_MIN_RETRY_WAIT_MS_DEFAULT,
+    COMMIT_NUM_RETRIES_DEFAULT,
+    SUPPORTED_TABLE_FORMAT_VERSION,
+    TableMetadata,
+    TableMetadataUtil,
+)
 from pyiceberg.table.refs import MAIN_BRANCH, SnapshotRef
 from pyiceberg.table.snapshots import (
     MetadataLogEntry,
@@ -63,7 +73,23 @@ class UpdateTableMetadata(ABC, Generic[U]):
     def _commit(self) -> UpdatesAndRequirements: ...
 
     def commit(self) -> None:
-        self._transaction._apply(*self._commit())
+        min_wait = int(
+            self._transaction.table_metadata.properties.get(COMMIT_MIN_RETRY_WAIT_MS, COMMIT_MIN_RETRY_WAIT_MS_DEFAULT)
+        )
+        max_wait = int(
+            self._transaction.table_metadata.properties.get(COMMIT_MAX_RETRY_WAIT_MS, COMMIT_MAX_RETRY_WAIT_MS_DEFAULT)
+        )
+
+        @wraps(self.commit)
+        @retry(
+            wait=wait_random_exponential(min=min_wait, max=max_wait, exp_base=2),
+            stop=stop_after_attempt(COMMIT_NUM_RETRIES_DEFAULT),
+            retry=retry_if_exception_type(CommitFailedException),
+        )
+        def commit_inner():
+            self._transaction._apply(*self._commit())
+
+        return commit_inner()
 
     def __exit__(self, _: Any, value: Any, traceback: Any) -> None:
         """Close and commit the change."""

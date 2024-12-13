@@ -68,6 +68,16 @@ SPEC_ID = "spec-id"
 FIELD_ID = "field-id"
 FIELDS = "fields"
 
+COMMIT_NUM_RETRIES = "commit.retry.num-retries"
+COMMIT_NUM_RETRIES_DEFAULT = 4
+
+COMMIT_MIN_RETRY_WAIT_MS = "commit.retry.min-wait-ms"
+COMMIT_MIN_RETRY_WAIT_MS_DEFAULT = 100
+
+COMMIT_MAX_RETRY_WAIT_MS = "commit.retry.max-wait-ms"
+COMMIT_MAX_RETRY_WAIT_MS_DEFAULT = 60 * 1000  # 1 minute
+
+
 INITIAL_SEQUENCE_NUMBER = 0
 INITIAL_SPEC_ID = 0
 DEFAULT_SCHEMA_ID = 0

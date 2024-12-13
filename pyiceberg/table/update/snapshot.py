@@ -22,11 +22,13 @@ import uuid
 from abc import abstractmethod
 from collections import defaultdict
 from concurrent.futures import Future
-from functools import cached_property
+from functools import cached_property, wraps
 from typing import TYPE_CHECKING, Callable, Dict, Generic, List, Optional, Set, Tuple
 
 from sortedcontainers import SortedList
 
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_random_exponential
+from pyiceberg.exceptions import CommitFailedException
 from pyiceberg.expressions import (
     AlwaysFalse,
     BooleanExpression,
@@ -54,6 +56,13 @@ from pyiceberg.manifest import (
 )
 from pyiceberg.partitioning import (
     PartitionSpec,
+)
+from pyiceberg.table.metadata import (
+    COMMIT_MAX_RETRY_WAIT_MS,
+    COMMIT_MAX_RETRY_WAIT_MS_DEFAULT,
+    COMMIT_MIN_RETRY_WAIT_MS,
+    COMMIT_MIN_RETRY_WAIT_MS_DEFAULT,
+    COMMIT_NUM_RETRIES_DEFAULT,
 )
 from pyiceberg.table.snapshots import (
     Operation,
@@ -237,6 +246,9 @@ class _SnapshotProducer(UpdateTableMetadata[U], Generic[U]):
             previous_summary=previous_snapshot.summary if previous_snapshot is not None else None,
             truncate_full_table=self._operation == Operation.OVERWRITE,
         )
+
+    @abstractmethod
+    def _clean_uncommitted(self) -> _SnapshotProducer[U]: ...
 
     def _commit(self) -> UpdatesAndRequirements:
         new_manifests = self._manifests()
@@ -470,6 +482,25 @@ class _FastAppendFiles(_SnapshotProducer["_FastAppendFiles"]):
         In case of an append, nothing is deleted.
         """
         return []
+
+    def _commit(self) -> UpdatesAndRequirements:
+        min_wait = int(
+            self._transaction.table_metadata.properties.get(COMMIT_MIN_RETRY_WAIT_MS, COMMIT_MIN_RETRY_WAIT_MS_DEFAULT)
+        )
+        max_wait = int(
+            self._transaction.table_metadata.properties.get(COMMIT_MAX_RETRY_WAIT_MS, COMMIT_MAX_RETRY_WAIT_MS_DEFAULT)
+        )
+
+        @wraps(self._commit)
+        @retry(
+            wait=wait_random_exponential(min=min_wait, max=max_wait, exp_base=2),
+            stop=stop_after_attempt(COMMIT_NUM_RETRIES_DEFAULT),
+            retry=retry_if_exception_type(CommitFailedException),
+        )
+        def commit_inner() -> UpdatesAndRequirements:
+            return super()._commit()
+
+        return commit_inner()
 
 
 class _MergeAppendFiles(_FastAppendFiles):
